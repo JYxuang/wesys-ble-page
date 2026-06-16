@@ -802,6 +802,97 @@
             opacity: 1;
         }
 
+        .export-modal {
+            position: absolute;
+            inset: 0;
+            z-index: 8;
+            display: none;
+            align-items: flex-end;
+            justify-content: center;
+            padding: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom));
+            background: rgba(24, 33, 47, 0.36);
+        }
+
+        .export-modal.show { display: flex; }
+
+        .export-sheet {
+            width: min(520px, 100%);
+            max-height: calc(100svh - 20px);
+            display: grid;
+            grid-template-rows: auto minmax(220px, 1fr) auto;
+            gap: 10px;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid var(--line);
+            background: var(--panel);
+            box-shadow: var(--shadow);
+        }
+
+        .export-head {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 10px;
+            align-items: start;
+        }
+
+        .export-title {
+            font-size: 13px;
+            line-height: 1.2;
+            font-weight: 800;
+        }
+
+        .export-filename {
+            margin-top: 4px;
+            color: var(--muted);
+            font-size: 10px;
+            line-height: 1.2;
+            overflow-wrap: anywhere;
+        }
+
+        .export-close {
+            width: 30px;
+            height: 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 800;
+        }
+
+        .export-textarea {
+            width: 100%;
+            min-height: 220px;
+            padding: 8px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: #fbfcfe;
+            color: var(--ink);
+            font-family: Consolas, "SFMono-Regular", monospace;
+            font-size: 10px;
+            line-height: 1.35;
+            resize: none;
+            outline: none;
+            -webkit-user-select: text;
+            user-select: text;
+        }
+
+        .export-actions {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+        }
+
+        .export-actions button {
+            min-width: 0;
+            height: 36px;
+            border: 0;
+            border-radius: 8px;
+            background: var(--ink);
+            color: #fff;
+            font-size: 12px;
+            font-weight: 800;
+        }
+
+        .export-actions button:first-child { background: var(--blue); }
+
         .hidden { display: none; }
 
         @media (max-height: 740px) {
@@ -952,6 +1043,23 @@
 
     <section id="pageDashboard" class="page result-page">
         <div id="notice" class="notice"></div>
+        <div id="exportModal" class="export-modal" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+            <div class="export-sheet">
+                <div class="export-head">
+                    <div>
+                        <div id="exportTitle" class="export-title">Export data</div>
+                        <div id="exportFilename" class="export-filename"></div>
+                    </div>
+                    <button class="mini-icon export-close" type="button" title="Close" aria-label="Close export" onclick="closeExportModal()">x</button>
+                </div>
+                <textarea id="exportText" class="export-textarea" readonly spellcheck="false"></textarea>
+                <div class="export-actions">
+                    <button type="button" onclick="copyExportText()">Copy</button>
+                    <button type="button" onclick="openExportText()">Open</button>
+                    <button type="button" onclick="closeExportModal()">Close</button>
+                </div>
+            </div>
+        </div>
 
         <div class="topbar">
             <button class="back-btn" type="button" title="Back to routing" aria-label="Back to routing" onclick="backToRoutingFromDashboard()">&lt;</button>
@@ -1340,6 +1448,7 @@
         let lastRenderMs = 0;
         let metricsInterval = null;
         let noticeTimer = 0;
+        let pendingExport = null;
         let scheduledTask = null;
         let scheduleDefaultsReady = false;
         let lastScheduleMeta = null;
@@ -4059,7 +4168,7 @@
             return String(value == null || value === "" ? "NA" : value).replace(/[\t\r\n]/g, " ").trim() || "NA";
         }
 
-        function saveAllData() {
+        async function saveAllData() {
             const rows = [];
             const sessionId = timestampName();
             const meta = metadataForSave(sessionId);
@@ -4078,16 +4187,114 @@
                 const p = pulseExport[i] || ["", ""];
                 rows.push([cell(e[0]), cell(e[1]), cell(g[0]), cell(g[1]), cell(t[0]), cell(t[1]), cell(p[0]), cell(p[1])].concat(metaValues).join("\t"));
             }
-            const blob = new Blob([rows.join("\n")], { type: "text/plain;charset=utf-8" });
+            const filename = "wesys_v8_" + safeName(meta.subject_id) + "_" + meta.session_role + "_" + gluMode.toLowerCase() + "_" + sessionId + ".txt";
+            const message = resampleRt ? "Data saved with resampled R-t" : "Data saved";
+            await exportTextFile(filename, rows.join("\n"), message);
+        }
+
+        async function exportTextFile(filename, text, successMessage) {
+            const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+            if (navigator.share && typeof File === "function") {
+                try {
+                    const file = new File([blob], filename, { type: blob.type });
+                    if (!navigator.canShare || navigator.canShare({ files: [file] })) {
+                        await navigator.share({
+                            files: [file],
+                            title: filename,
+                            text: "WeSys data export"
+                        });
+                        showNotice(successMessage);
+                        return;
+                    }
+                } catch (err) {
+                    console.warn("Native share export failed", err);
+                }
+            }
+
+            if (!isAppleTouchDevice()) {
+                triggerTextDownload(filename, blob);
+                showNotice(successMessage);
+                return;
+            }
+
+            showExportModal(filename, text);
+            showNotice("Export ready");
+        }
+
+        function triggerTextDownload(filename, blob) {
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = url;
-            a.download = "wesys_v8_" + safeName(meta.subject_id) + "_" + meta.session_role + "_" + gluMode.toLowerCase() + "_" + sessionId + ".txt";
+            a.download = filename;
             document.body.appendChild(a);
             a.click();
             a.remove();
-            URL.revokeObjectURL(url);
-            showNotice(resampleRt ? "Data saved with resampled R-t" : "Data saved");
+            setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+        }
+
+        function isAppleTouchDevice() {
+            return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+        }
+
+        function showExportModal(filename, text) {
+            closeExportModal();
+            pendingExport = { filename: filename, text: text, url: null };
+            const modal = document.getElementById("exportModal");
+            const nameEl = document.getElementById("exportFilename");
+            const textEl = document.getElementById("exportText");
+            if (nameEl) nameEl.textContent = filename;
+            if (textEl) {
+                textEl.value = text;
+                textEl.scrollTop = 0;
+            }
+            if (modal) modal.classList.add("show");
+        }
+
+        async function copyExportText() {
+            const textEl = document.getElementById("exportText");
+            const text = pendingExport ? pendingExport.text : (textEl ? textEl.value : "");
+            if (!text) return;
+            try {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(text);
+                } else if (textEl) {
+                    textEl.focus();
+                    textEl.select();
+                    document.execCommand("copy");
+                }
+                showNotice("Data copied");
+            } catch (err) {
+                console.warn("Copy failed", err);
+                if (textEl) {
+                    textEl.focus();
+                    textEl.select();
+                }
+                showNotice("Select and copy");
+            }
+        }
+
+        function openExportText() {
+            const text = pendingExport ? pendingExport.text : "";
+            if (!text) return;
+            if (pendingExport && pendingExport.url) {
+                URL.revokeObjectURL(pendingExport.url);
+                pendingExport.url = null;
+            }
+            const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            if (pendingExport) pendingExport.url = url;
+            const opened = window.open(url, "_blank");
+            if (!opened) window.location.href = url;
+        }
+
+        function closeExportModal() {
+            const modal = document.getElementById("exportModal");
+            const textEl = document.getElementById("exportText");
+            if (modal) modal.classList.remove("show");
+            if (textEl) textEl.value = "";
+            if (pendingExport && pendingExport.url) URL.revokeObjectURL(pendingExport.url);
+            pendingExport = null;
         }
 
         function timestampName() {
